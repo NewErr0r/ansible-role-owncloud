@@ -1,0 +1,176 @@
+---
+- rpm_key:
+    state: present
+    key: https://rpms.remirepo.net/RPM-GPG-KEY-remi2018
+
+- rpm_key:
+    state: present
+    key: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-8
+
+- name: Install php7.4 | Install epel repo
+  yum:
+    name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
+    state: present
+
+- name: Install php7.4 | Install remi repo
+  yum:
+    name: "http://rpms.remirepo.net/enterprise/remi-release-8.rpm"
+    state: present
+
+- name: Install php7.4 | Install dnf-utils
+  dnf: 
+    name: dnf-utils
+    state: latest
+
+- name: Install php7.4 | Enable the flow module for PHP 7.4
+  dnf: 
+    name: '@php:remi-7.4'
+    state: present
+
+- name: Install php7.4 | Install php7.4
+  yum: 
+    name: php
+    state: latest
+
+- name: System preparation | Installing the chrony utility
+  yum:
+    name: chrony
+    state: latest 
+
+- name: System preparation | Enabled chrony
+  service:
+    name: chronyd
+    enabled: true 
+    state: started    
+
+- name: "System preparation | Set timezone to {{ timezone }}"
+  community.general.timezone:
+    name: "{{ timezone }}"
+
+- name: System preparation  | Setting firewall
+  firewalld:
+    service: "{{ item }}"
+    permanent: true 
+    state: enabled
+  loop:
+    - http 
+    - https
+  notify: 
+    - Restarted firewalld
+
+- name: System preparation | Disable SELinux 
+  ansible.posix.selinux:
+    state: disabled
+
+- name: System preparation | Disable SELinux now
+  command: 
+    cmd: setenforce 0 
+  when: 
+    - ansible_selinux.status == "enabled"
+
+- name: Configuring the MariaDB | Install MariaDB 
+  dnf:
+    name: 
+      - mariadb-server 
+      - mariadb
+      - python3-PyMySQL
+    state: latest
+
+- name: Configuring the MariaDB | Started and Enabled MariaDB 
+  service: 
+    name: mariadb 
+    state: started 
+    enabled: true
+
+- name: Configuring the MariaDB | Configure root password MariaDB
+  mysql_user:
+    check_implicit_admin: true
+    login_user: root 
+    login_password: "{{ mariadb_root_password }}"
+    user: root 
+    password: "{{ mariadb_root_password }}"
+    host: localhost  
+
+- name: Configuring the MariaDB | Create database for OwnCloud
+  community.mysql.mysql_db:
+    name: "{{ database_name }}"
+    encoding: utf8
+    collation: utf8_bin
+    login_user: root
+    login_password: "{{ mariadb_root_password }}"
+  failed_when: false 
+
+- name: Configuring the MariaDB | Create username database for OwnCloud
+  community.mysql.mysql_user:
+    name: "{{ database_username }}"
+    password: "{{ database_username_password }}"
+    priv: '*.*:ALL,GRANT'
+    host: '%'
+    state: present
+    login_user: root
+    login_password: "{{ mariadb_root_password }}"
+
+- name: Configuring the web-server | Install php-packeges
+  dnf:
+    name: "{{ php_packeges }}"
+    state: present
+
+- name: Configuring the web-server | Setting php-fpm
+  lineinfile: 
+    dest: "/etc/php-fpm.d/www.conf"
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop: 
+    - { regexp: 'listen = /run/php-fpm/www.sock', line: 'listen = /run/php-fpm/www.sock'}
+    - { regexp: '^;listen.owner =', line: 'listen.owner = nginx'}
+  notify:
+    - Started and Enabled php-fpm
+
+- name: Configure the web-server | Install NGINX
+  dnf:
+    name: nginx 
+    state: latest 
+
+- name: Configure the web-server | Creating a virtual domain
+  template: 
+    src: owncloud.conf.j2
+    dest: "/etc/nginx/conf.d/{{ server_name }}.conf"
+
+- name: Configure the web-server | Create a directory for ssl certifications
+  ansible.builtin.file:
+    path: "{{ path_ssl_cert }}"
+    state: directory
+    mode: '0755'
+
+- name: Configure the web-server | Generating a self-signed certificate
+  command:
+    cmd: openssl req -new -x509 -days 1461 -nodes -out cert.pem -keyout cert.key -subj "/C={{ C }}/ST={{ ST }}/L={{ L }}/O={{ O }} Security/OU={{ Security_OU }} Department/CN={{ Department_CN }}/CN={{ CN }}"
+    chdir: "{{ path_ssl_cert }}"
+    creates: "{{ ssl_certificate }}"
+  notify: 
+    - Started and Enable NGINX
+
+- name: Installing Owncloud | Install wget and bzip2
+  yum: 
+    name: 
+      - wget
+      - bzip2
+    state: latest
+
+- name: Installing Owncloud | Download the source code for installation
+  get_url: 
+    url: "{{ url_download_owncloud }}"
+    dest: "{{ dir_download }}"
+    
+- name: Installing Owncloud | Unpacking the downloaded archive
+  shell: | 
+    cd {{ dir_download }}
+    tar -xvjf owncloud-*.tar.bz2 -C /var/www/
+
+- name: Installing Owncloud | Recursively change ownership of a directory
+  ansible.builtin.file:
+    path: "{{ path_owncloud }}"
+    state: directory
+    recurse: yes
+    owner: apache
+    group: apache
